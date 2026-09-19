@@ -28,6 +28,16 @@ export class Pointer {
     private disposables: CompositeDisposable = new CompositeDisposable();
     private pointerType: PointerType = PointerType.Default;
     private pointerSubFrame: number = 0;
+    private overCanvas = false;
+    private readonly leaveCanvas = (): void => {
+        this.overCanvas = false;
+        this.updateVisibility();
+    };
+    private updateVisibility(): void {
+        const visible = this.userPointerVisible && (this.pointerLock.isActive() || this.overCanvas);
+        this.sprite.setVisible(visible);
+        this.canvas.style.cursor = visible ? 'none' : '';
+    }
     public pointerEvents?: PointerEvents;
     static factory(shpFile: any, palette: any, canvasContainer: any, document: Document, canvasMetrics: CanvasMetrics, mouseAcceleration: BoxedVar<boolean>): Pointer {
         const sprite = PointerSprite.fromShpFile(shpFile, palette);
@@ -49,6 +59,8 @@ export class Pointer {
         this.onMouseMove = this.onMouseMove.bind(this);
     }
     private onMouseMove = (event: MouseEvent): void => {
+        this.overCanvas = event.target === this.canvas;
+        this.updateVisibility();
         const position = this.position;
         if (this.pointerLock.isActive()) {
             position.x = position.x + event.movementX;
@@ -72,7 +84,7 @@ export class Pointer {
     init(): void {
         this.listenForFirstCanvasClick();
         this.pointerLock.onChange.subscribe((isActive: boolean) => {
-            this.sprite.setVisible(this.userPointerVisible && isActive);
+            this.updateVisibility();
             const requestLock = (): void => {
                 if (this.userLockMode) {
                     this.pointerLock
@@ -91,6 +103,8 @@ export class Pointer {
             }
         });
         this.document.addEventListener("mousemove", this.onMouseMove, true);
+        this.canvas.addEventListener('mouseleave', this.leaveCanvas);
+        this.disposables.add(() => this.canvas.removeEventListener('mouseleave', this.leaveCanvas));
         this.disposables.add(() => this.document.removeEventListener("mousemove", this.onMouseMove, true));
     }
     private listenForFirstCanvasClick(): void {
@@ -134,7 +148,7 @@ export class Pointer {
     }
     setVisible(visible: boolean): void {
         this.userPointerVisible = visible;
-        this.sprite.setVisible(visible && this.pointerLock.isActive());
+        this.updateVisibility();
     }
     getUserLockMode(): boolean {
         return this.userLockMode;
@@ -143,6 +157,8 @@ export class Pointer {
         return this.sprite;
     }
     setPointerType(type: PointerType, subFrame: number = 0): void {
+        // Classic-only resource sets have no YR spy-plane frames. Use their aircraft cursor.
+        if (type === PointerType.SpyPlane && this.sprite.getFrameCount() < 512) type = PointerType.Unknown7;
         if (this.pointerType !== type || this.pointerSubFrame !== subFrame) {
             this.pointerType = type;
             this.pointerSubFrame = subFrame;
@@ -156,10 +172,12 @@ export class Pointer {
             }
             else {
                 const startFrame = type;
-                const endFrame = (Object.keys(PointerType)
+                const endFrame = Math.min(
+                    type === PointerType.Beacon ? 449 : type === PointerType.SpyPlane ? 511 : this.sprite.getFrameCount() - 1,
+                    (Object.keys(PointerType)
                     .map(Number)
                     .find((value) => !Number.isNaN(value) && type < value) ??
-                    this.sprite.getFrameCount()) - 1;
+                    this.sprite.getFrameCount()) - 1);
                 this.sprite.setFrame(startFrame);
                 if (startFrame < endFrame) {
                     const runner = new SimpleRunner();

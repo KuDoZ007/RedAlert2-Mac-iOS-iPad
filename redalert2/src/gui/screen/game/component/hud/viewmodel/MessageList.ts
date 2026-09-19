@@ -1,5 +1,7 @@
 import { EventDispatcher } from "@/util/event";
+export interface ChatBadge { label: string; color: string }
 export interface Message {
+    badge?: ChatBadge;
     text: string;
     color: string;
     time: number;
@@ -11,7 +13,9 @@ export class MessageList {
     maxMessages: number;
     localPlayer: any;
     isComposing: boolean;
+    observerChat = false;
     messages: Message[];
+    private recentChatMessages: Message[] = [];
     private _onNewMessage: EventDispatcher<[
         MessageList,
         Message
@@ -55,13 +59,19 @@ export class MessageList {
         this.messages.push(msg);
         this._onNewMessage.dispatch(this as any, msg);
     }
-    addChatMessage(text: string, color: string) {
+    getRecentChatMessages(): Message[] {
+        return this.recentChatMessages;
+    }
+    addChatMessage(text: string, color: string, badge?: ChatBadge) {
         const msg: Message = {
             text,
             color,
             time: Date.now(),
             animate: true,
         };
+        if (badge) msg.badge = { ...badge };
+        this.recentChatMessages.push(msg);
+        if (this.recentChatMessages.length > 10) this.recentChatMessages.shift();
         this.messages.push(msg);
         this._onNewMessage.dispatch(this as any, msg);
     }

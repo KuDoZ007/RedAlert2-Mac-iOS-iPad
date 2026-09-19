@@ -19,7 +19,7 @@ die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 # ---------------------------------------------------------------- prereqs
 bold "Checking prerequisites..."
 command -v bun >/dev/null 2>&1 || die "bun is required. Install: curl -fsSL https://bun.sh/install | bash"
-command -v ffmpeg >/dev/null 2>&1 || die "ffmpeg is required (music/video conversion). Install: brew install ffmpeg"
+command -v ffmpeg >/dev/null 2>&1 || die "ffmpeg is required (music/video conversion). Install: brew install ffmpeg (macOS) or sudo pacman -S ffmpeg (Arch)"
 echo "  bun $(bun --version), ffmpeg OK"
 
 # ------------------------------------------------------------ find retail
@@ -74,6 +74,14 @@ cat <<'EOF'
   Desktop dev server (no Xcode needed):
     cd redalert2 && RA2_HTTP=1 bun run dev
     open http://localhost:4000/?shell=1
+
+  Apple Silicon Mac build (macOS 14+, Xcode; see docs/MACOS.md):
+    bash scripts/build-macos.sh --retail-dir "/path/to/your/ra2/install"
+    open "build/macos/yr/Red Alert 2.app"
+
+  Linux build (Arch/Omarchy, needs the electron43 package; see docs/LINUX.md):
+    bash scripts/build-linux.sh --retail-dir "/path/to/your/ra2/install"
+    build/linux/yr/run.sh
 
   iOS simulator build (needs Xcode + xcodegen: brew install xcodegen):
     ./scripts/build-ios.sh

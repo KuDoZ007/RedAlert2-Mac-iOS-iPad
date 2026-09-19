@@ -83,3 +83,26 @@ Command & Conquer, Red Alert and Yuri's Revenge are trademarks of Electronic
 Arts Inc. This project is unaffiliated.
 
 *EA has not endorsed and does not support this product.*
+
+## WebSocket transport — `ws`
+
+The Electron multiplayer listener bundles `ws` (8.x), licensed under **MIT**.
+Copyright © 2011 Einar Otto Stangvik <einaros@gmail.com>; copyright © 2013
+Arnout Kazemier and contributors; copyright © 2016 Luigi Pinca and contributors. Source and licence are distributed in the
+`ws` dependency (`redalert2/node_modules/ws/LICENSE`); the complete MIT licence
+is also staged beside the Electron server bundle as `ws-LICENSE`.
+
+The multiplayer implementation is original TypeScript based on the design
+recorded in `docs/MULTIPLAYER_PLAN.md`; no OpenRA source has been copied.
+
+
+## Bun runtime — macOS multiplayer helper
+
+The Mac build compiles `redalert2/server/macos.ts` into `Contents/Helpers/RA2Server`
+with Bun. The app therefore includes Bun and its statically linked dependencies;
+players do not need a separately installed runtime. The upstream notices from
+Bun 1.4.2 are retained in `macos/Licenses/Bun-LICENSE.md` and copied into the app’s
+`Contents/Resources/Licenses/`, alongside the build-time Bun version. Source:
+https://github.com/oven-sh/bun/tree/bun-v1.4.2. Update these notices when upgrading
+the bundled runtime. See the upstream document for linked-library notices and
+WebKit rebuild instructions.

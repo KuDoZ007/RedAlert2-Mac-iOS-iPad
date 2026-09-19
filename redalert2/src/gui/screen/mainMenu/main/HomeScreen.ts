@@ -1,3 +1,10 @@
+import type { ReplayManager } from '@/gui/ReplayManager';
+import { readCampaignProgress, recordCampaignProgress } from '@/data/campaign/CampaignProgress';
+import { campaignMissions, campaignMissionForMap } from '@/data/campaign/CampaignMissions';
+import { launchCampaign, loadCampaignManifest } from '../../game/launchCampaign';
+import { Engine } from '@/engine/Engine';
+import { EngineType } from '@/engine/EngineType';
+import { MainMenuRoute } from '../MainMenuRoute';
 import { Screen } from '../../Controller';
 import { MainMenuScreenType } from '../../ScreenType';
 import { MainMenuController } from '../MainMenuController';
@@ -15,6 +22,7 @@ interface SidebarButton {
     onClick: () => void | Promise<void>;
 }
 export class HomeScreen implements Screen {
+    private launchingCampaign = false;
     private strings: Strings;
     private messageBoxApi: MessageBoxApi;
     private appVersion: string;
@@ -24,7 +32,7 @@ export class HomeScreen implements Screen {
     private controller?: MainMenuController;
     public title: string;
     public musicType: MusicType;
-    constructor(strings: Strings, messageBoxApi: MessageBoxApi, appVersion: string, storageEnabled: boolean = false, quickMatchEnabled: boolean = false, fullScreen?: FullScreen) {
+    constructor(strings: Strings, messageBoxApi: MessageBoxApi, appVersion: string, storageEnabled: boolean = false, quickMatchEnabled: boolean = false, fullScreen?: FullScreen, private rootController?: any, private replayManager?: ReplayManager) {
         this.strings = strings;
         this.messageBoxApi = messageBoxApi;
         this.appVersion = appVersion;
@@ -37,14 +45,49 @@ export class HomeScreen implements Screen {
     setController(controller: MainMenuController): void {
         this.controller = controller;
     }
-    onEnter(): void {
+    async onEnter(): Promise<void> {
         console.log('[HomeScreen] Entering home screen');
         // The native (iOS) build ships a focused menu: Skirmish, Load Game,
         // LAN and Options. The other entries stay available in web builds
         // (and their underlying systems remain in the bundle — saves are
         // built on the replay machinery).
         const nativeShell = isNativeShell();
+        const installed = [EngineType.RedAlert2, EngineType.YurisRevenge].includes(Engine.getActiveEngine())
+            ? await Promise.all(campaignMissions.map(async mission => ({mission, manifest:await loadCampaignManifest(mission)})))
+            : [];
         const buttons: SidebarButton[] = [
+            ...(installed.some(entry => entry.manifest) ? [{
+                label: 'Campaign',
+                tooltip: 'Play the Allied campaign or choose a mission',
+                onClick: async () => {
+                    if (this.launchingCampaign) return;
+                    this.launchingCampaign = true;
+                    try {
+                        // Builds before the progress tracker still have saves/replays.
+                        // Recognize a previous campaign without inventing victories.
+                        if (!readCampaignProgress().started && this.replayManager) {
+                            const entries = await this.replayManager.loadList().catch(() => []);
+                            for (const saved of [...entries].sort((a, b) => b.timestamp - a.timestamp)) {
+                                try {
+                                    const replay = await this.replayManager.loadReplay(saved);
+                                    const prior = campaignMissionForMap(replay.gameOpts.mapName ?? '');
+                                    if (prior) { recordCampaignProgress(prior); break; }
+                                } catch { /* One unreadable replay must not block the campaign. */ }
+                            }
+                        }
+                        const available = installed.filter(entry => entry.manifest);
+                        await this.controller?.pushScreen(MainMenuScreenType.Campaign, {
+                            installed:available.map(entry => entry.mission),
+                            launch:async (mission: typeof campaignMissions[number]) => {
+                                const entry = available.find(entry => entry.mission.id === mission.id);
+                                if (entry) await launchCampaign(entry.mission, entry.manifest, this.rootController, this.strings, this.messageBoxApi);
+                            },
+                        });
+                    }
+                    catch (error) { await this.messageBoxApi.alert(String(error), 'OK'); }
+                    finally { this.launchingCampaign = false; }
+                }
+            }] : []),
             {
                 label: 'Skirmish',
                 tooltip: 'Play a single-player skirmish against the AI',
@@ -63,7 +106,7 @@ export class HomeScreen implements Screen {
             },
             {
                 label: 'Load Game',
-                tooltip: 'Continue a saved skirmish match',
+                tooltip: 'Continue a saved campaign or skirmish',
                 onClick: () => {
                     console.log('[HomeScreen] Load Game clicked');
                     if (this.controller) {
@@ -81,25 +124,25 @@ export class HomeScreen implements Screen {
                             window.location.hash = '/liveinteraction';
                         }
                     },
-                    {
-                        label: 'Replays',
-                        tooltip: 'View and play back game replays',
-                        onClick: () => {
-                            console.log('[HomeScreen] Replays clicked');
-                            if (this.controller) {
-                                this.controller.pushScreen(MainMenuScreenType.ReplaySelection);
-                            }
-                        }
-                    },
                 ]
                 : []),
             {
-                label: 'LAN Multiplayer',
-                tooltip: 'Exchange SDP manually to establish a LAN P2P data channel',
+                label: 'Replays',
+                tooltip: 'View and play back game replays',
                 onClick: () => {
-                    console.log('[HomeScreen] LAN Setup clicked');
+                    console.log('[HomeScreen] Replays clicked');
                     if (this.controller) {
-                        this.controller.pushScreen(MainMenuScreenType.LanSetup);
+                        this.controller.pushScreen(MainMenuScreenType.ReplaySelection);
+                    }
+                }
+            },
+            {
+                label: 'Multiplayer',
+                tooltip: 'Create a game or join a host by address',
+                onClick: () => {
+                    console.log('[HomeScreen] Multiplayer clicked');
+                    if (this.controller) {
+                        this.controller.pushScreen(MainMenuScreenType.Multiplayer);
                     }
                 }
             },
@@ -155,6 +198,15 @@ export class HomeScreen implements Screen {
                     console.log('[HomeScreen] Fullscreen clicked');
                     this.toggleFullscreen();
                 }
+            });
+        }
+        const shell = (window as any).__RA2_SHELL__;
+        if ((shell?.platform === 'macos' || shell?.platform === 'linux' || shell?.platform === 'windows') && typeof shell.exitApp === 'function') {
+            buttons.push({
+                label: 'Exit',
+                tooltip: 'Close Red Alert 2',
+                isBottom: true,
+                onClick: () => shell.exitApp(),
             });
         }
         if (this.controller) {

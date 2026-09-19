@@ -149,7 +149,7 @@ export class Gui {
         const canvasMetrics = new CanvasMetrics(this.renderer.getCanvas(), window);
         canvasMetrics.init();
         this.canvasMetrics = canvasMetrics;
-        const pointer = Pointer.factory(Engine.images.get('mouse.shp'), Engine.palettes.get('mousepal.pal'), this.renderer, document, canvasMetrics, this.generalOptions.mouseAcceleration);
+        const pointer = Pointer.factory(Engine.images.get(Engine.vfs.fileExists('mouse.sha') ? 'mouse.sha' : 'mouse.shp'), Engine.palettes.get('mousepal.pal'), this.renderer, document, canvasMetrics, this.generalOptions.mouseAcceleration);
         pointer.init();
         this.pointer = pointer;
         this.uiScene.add(pointer.getSprite());
@@ -323,6 +323,8 @@ export class Gui {
         const { TestEntryScreen } = await import('./gui/screen/mainMenu/main/TestEntryScreen.js');
         subScreens.set(MainMenuScreenType.TestEntry, TestEntryScreen);
         subScreens.set(MainMenuScreenType.LanSetup, LanSetupScreen);
+        const { MultiplayerScreen } = await import('./gui/screen/mainMenu/multiplayer/MultiplayerScreen.js');
+        subScreens.set(MainMenuScreenType.Multiplayer, MultiplayerScreen);
         const { InfoAndCreditsScreen } = await import('./gui/screen/mainMenu/infoAndCredits/InfoAndCreditsScreen.js');
         const { CreditsScreen } = await import('./gui/screen/mainMenu/credits/CreditsScreen.js');
         subScreens.set(MainMenuScreenType.InfoAndCredits, InfoAndCreditsScreen);

@@ -1,5 +1,5 @@
 import { IrcConnection } from "@/network/IrcConnection";
-import { recordGamePerformanceFrame } from "@/performance/PerformanceRuntime";
+import { recordGamePerformanceFrame, isPerformanceTelemetryEnabled, recordSchedulerPerformanceFrame, measurePerformanceMetric, setPerformanceContext } from "@/performance/PerformanceRuntime";
 interface LocalPlayer {
     isObserver: boolean;
 }
@@ -13,6 +13,7 @@ interface Renderer {
     flush(): void;
 }
 interface Sound {
+    gameplaySuppressed?: boolean;
     audioSystem: {
         setMuted(muted: boolean): void;
     };
@@ -25,6 +26,7 @@ interface GameTurnManager {
 }
 interface GameAnimationLoopOptions {
     skipFrames?: boolean;
+    isCatchingUp?: () => boolean;
     skipBudgetMillis?: number;
     // Live-readable render fps cap (0 = display rate). Sim ticks always run.
     frameLimit?: {
@@ -64,6 +66,7 @@ export class GameAnimationLoop {
     private doBackgroundFrame = (timestamp: number): void => {
         if (this.isStarted && this.paused) {
             let deltaFrames = this.updateDeltaGameFrames(timestamp);
+            if (this.options.isCatchingUp?.()) { this.advanceCatchup(timestamp); return; }
             if (this.turnMgrIsWaiting) {
                 deltaFrames = 1;
             }
@@ -75,8 +78,23 @@ export class GameAnimationLoop {
     };
     private doFrame = (timestamp: number): void => {
         if (this.isStarted && !this.paused) {
+            if (isPerformanceTelemetryEnabled()) {
+                recordSchedulerPerformanceFrame(timestamp);
+                setPerformanceContext('gameLoop', {
+                    hidden: document.hidden, waitingForTurn: this.turnMgrIsWaiting,
+                    turnMillis: this.gameTurnMgr.getTurnMillis(),
+                    frameLimit: this.options.frameLimit?.value ?? 0,
+                    frameLimitOverride: this.options.frameLimitOverride?.value ?? 0,
+                    catchingUp: Boolean(this.options.isCatchingUp?.()),
+                });
+            }
             let deltaFrames = this.updateDeltaGameFrames(timestamp);
-            if (this.turnMgrIsWaiting || (!this.options.skipFrames && deltaFrames > 1)) {
+            const catchingUp = Boolean(this.options.isCatchingUp?.());
+            if (catchingUp) {
+                this.advanceCatchup(timestamp);
+                deltaFrames = 0;
+            }
+            if (!catchingUp && (this.turnMgrIsWaiting || (!this.options.skipFrames && deltaFrames > 1))) {
                 deltaFrames = 1;
             }
             if (this.options.skipBudgetMillis) {
@@ -104,7 +122,7 @@ export class GameAnimationLoop {
             // display instead of every third.
             const userCap = this.options.frameLimit?.value ?? 0;
             const overrideCap = this.options.frameLimitOverride?.value ?? 0;
-            const fpsCap = overrideCap > 0
+            const fpsCap = catchingUp ? 10 : overrideCap > 0
                 ? (userCap > 0 ? Math.min(userCap, overrideCap) : overrideCap)
                 : userCap;
             if (fpsCap > 0) {
@@ -131,8 +149,23 @@ export class GameAnimationLoop {
             }
         }
     };
+    private advanceCatchup(timestamp: number): void {
+        const until = performance.now() + (this.options.skipBudgetMillis ?? 8);
+        this.sound.gameplaySuppressed = true;
+        try {
+            while (this.isStarted && this.options.isCatchingUp?.() && performance.now() < until) {
+                if (!this.tickGame(timestamp)) break;
+            }
+        } finally {
+            this.sound.gameplaySuppressed = false;
+            // Do not replay wall-clock debt after the accelerated segment.
+            this.startTime = timestamp;
+            this.lastGameFrame = 0;
+        }
+    }
     private handleVisibilityChange = (): void => {
         const isHidden = document.hidden;
+        setPerformanceContext('visibility', { hidden: isHidden, atMs: performance.now() });
         if (this.paused !== isHidden) {
             if (this.localPlayer &&
                 !this.localPlayer.isObserver &&
@@ -211,10 +244,10 @@ export class GameAnimationLoop {
     }
     private tickGame(timestamp: number): boolean {
         if (!this.options.onError) {
-            return this.gameTurnMgr.doGameTurn(timestamp);
+            return measurePerformanceMetric('simulation.turn', () => this.gameTurnMgr.doGameTurn(timestamp));
         }
         try {
-            return this.gameTurnMgr.doGameTurn(timestamp);
+            return measurePerformanceMetric('simulation.turn', () => this.gameTurnMgr.doGameTurn(timestamp));
         }
         catch (error) {
             this.gameTurnMgr.setErrorState();

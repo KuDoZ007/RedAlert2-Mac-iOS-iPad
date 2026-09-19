@@ -1,3 +1,4 @@
+import { measurePerformanceMetric, setPerformanceSimulationTick } from "@/performance/PerformanceRuntime";
 import { ConstructionWorker } from "./ConstructionWorker";
 import { GameOpts, isHumanPlayerInfo } from "./gameopts/GameOpts";
 import { ObjectType } from "../engine/type/ObjectType";
@@ -40,6 +41,7 @@ import { OBS_COUNTRY_ID } from "./gameopts/constants";
 import { getZoneType } from "./gameobject/unit/ZoneType";
 import { Prng } from "./Prng";
 import { TriggerManager } from "./trigger/TriggerManager";
+import type { CampaignSetup } from './campaign/CampaignSetup';
 import { CountdownTimer } from "./CountdownTimer";
 import { WeaponType } from "./WeaponType";
 import { Warhead } from "./Warhead";
@@ -80,6 +82,7 @@ export class Game {
     public objectFactory: any;
     public botManager: any;
     public triggers = new TriggerManager();
+    public campaign?: CampaignSetup;
     public localPlayer: any;
     public mapShroudTrait: any;
     public crateGeneratorTrait: any;
@@ -162,20 +165,26 @@ export class Game {
     init(localPlayer: any) {
         this.localPlayer = localPlayer;
         this.createMapObjects();
-        this.createPlayerInitialUnits();
+        if (!this.campaign) this.createPlayerInitialUnits();
         this.map.terrain.computeAllPassabilityGraphs();
         this.mapShroudTrait.init(this);
         this.crateGeneratorTrait.init(this);
-        this.playerList.getAll().forEach((player: any) => (player.credits = this.gameOpts.credits));
-        if (this.rules.mpDialogSettings.alliesAllowed) {
+        if (this.campaign) {
+            for (const player of this.getAllPlayers()) {
+                if (this.campaign.hasFreeRadar(player)) player.radarTrait?.setDisabled(false);
+            }
+        }
+        if (!this.campaign) this.playerList.getAll().forEach((player: any) => (player.credits = this.gameOpts.credits));
+        if (!this.campaign && this.rules.mpDialogSettings.alliesAllowed) {
             this.createInitialTeams();
         }
     }
     start() {
+        this.campaign?.assertReadyToStart();
         this.status = GameStatus.Started;
         this.currentTick = 0;
         this.currentTime = 0;
-        this.botManager.init(this);
+        if (!this.campaign) this.botManager.init(this);
         this.triggers.init(this);
     }
     createInitialTeams() {
@@ -332,10 +341,13 @@ export class Game {
         }
     }
     createInitialMapTechnos(technos: any[]) {
-        const playersByCountry = new Map(this.playerList
+        const playersByOwner = new Map(this.playerList
             .getAll()
             .filter((player: any) => !!player.country)
             .map((player: any) => [player.country.name, player]));
+        if (this.campaign) {
+            for (const player of this.getAllPlayers()) playersByOwner.set(player.name, player);
+        }
         const tags = this.map.getTags();
         for (const techno of technos) {
             const name = techno.name;
@@ -347,12 +359,12 @@ export class Game {
                 console.warn(`Invalid map object location (${techno.rx},${techno.ry})`, techno);
                 continue;
             }
-            const owner = playersByCountry.get(techno.owner);
+            const owner = playersByOwner.get(techno.owner);
             if (!owner) {
                 console.warn(`Invalid owner "${techno.owner}" for map object`, techno);
                 continue;
             }
-            if (!(owner as any).isNeutral) {
+            if (!this.campaign && !(owner as any).isNeutral) {
                 continue;
             }
             const obj = this.createObject(techno.type, name);
@@ -751,21 +763,27 @@ export class Game {
         });
     }
     update() {
+        setPerformanceSimulationTick(this.currentTick);
+        return measurePerformanceMetric('simulation.tick', () => this.updateSimulation());
+    }
+    private updateSimulation() {
         if (this.status === GameStatus.NotStarted) {
             return;
         }
-        this.botManager.update(this);
+        measurePerformanceMetric('simulation.ai', () => this.botManager.update(this));
         if (this.status !== GameStatus.Ended) {
             if (this.lastGameEndCheck === undefined || this.currentTime - this.lastGameEndCheck >= 1000) {
                 this.checkGameEndConditions();
                 this.lastGameEndCheck = this.currentTime;
             }
         }
-        for (const obj of [...this.updatableObjects]) {
-            if (obj.isSpawned) {
-                obj.update(this);
+        measurePerformanceMetric('simulation.objects', () => {
+            for (const obj of [...this.updatableObjects]) {
+                if (obj.isSpawned) {
+                    obj.update(this);
+                }
             }
-        }
+        });
         this.playerList.getCombatants().forEach((player: any) => {
             player.cheerCooldownTicks = Math.max(0, player.cheerCooldownTicks - 1);
         });
@@ -791,7 +809,8 @@ export class Game {
             callback();
         }
         this.afterTickCallbacks.length = 0;
-        this.triggers.update(this);
+        if (this.status !== GameStatus.Ended) this.campaign?.teams.update(this);
+        if (this.status !== GameStatus.Ended) this.triggers.update(this);
         this.countdownTimer.update(this);
         this.currentTick++;
         this.currentTime += 1000 / GameSpeed.BASE_TICKS_PER_SECOND;
@@ -800,6 +819,7 @@ export class Game {
         this.afterTickCallbacks.push(callback);
     }
     checkGameEndConditions() {
+        if (this.campaign) return;
         this.updateDefeatedPlayers(this.playerList.getCombatants());
         const shouldEnd = (this.localPlayer?.defeated && !this.localPlayer.isObserver) ||
             (!this.alliances.getHostilePlayers().length &&

@@ -7,9 +7,8 @@ import { SpriteUtils } from "@/engine/gfx/SpriteUtils";
 import { CanvasUtils } from "@/engine/gfx/CanvasUtils";
 import { HtmlView } from "@/gui/jsx/HtmlView";
 import { HudChat } from "./HudChat";
-import { ChatRecipientType } from "@/network/chat/ChatMessage";
-import { RECIPIENT_ALL } from "@/network/gservConfig";
 type Message = {
+    badge?: { label: string; color: string };
     color: string;
     text: string;
     animate: boolean;
@@ -28,6 +27,8 @@ type MessagesProps = UiComponentProps & {
         isComposing: boolean;
     };
     chatHistory: any;
+    composerY: number;
+    localPlayer?: any;
     onMessageSubmit: (e: any) => void;
     onMessageCancel: () => void;
     onMessageTick?: () => void;
@@ -77,10 +78,13 @@ export class Messages extends UiComponent<MessagesProps> {
         return mesh;
     }
     defineChildren() {
-        return jsx("fragment", null, jsx("container", { hidden: true, ref: (e: any) => (this.inputContainer = e) }, jsx(HtmlView, {
+        return jsx("fragment", null, jsx("container", { x: 5, y: this.props.composerY, hidden: true, ref: (e: any) => (this.inputContainer = e) }, jsx(HtmlView, {
             component: HudChat,
+            width: this.props.width - 10,
             props: {
                 strings: this.props.strings,
+                isComposing: false,
+                localPlayer: this.props.localPlayer,
                 messageList: this.props.messages,
                 chatHistory: this.props.chatHistory,
                 onSubmit: this.props.onMessageSubmit,
@@ -107,7 +111,7 @@ export class Messages extends UiComponent<MessagesProps> {
                 this.lastComposing = isComposing;
                 this.drawMessages(isComposing, messages, nowTime);
                 this.inputContainer.setVisible(isComposing);
-                this.inputComponent.refresh();
+                this.inputComponent.applyOptions((props: any) => { props.isComposing = isComposing; });
             }
         }
     }
@@ -118,30 +122,14 @@ export class Messages extends UiComponent<MessagesProps> {
         const maxLineLength = Math.floor((110 * this.props.width) / 600);
         let needsTick = false;
         let y = 0;
-        let msgList = messages;
-        if (isComposing) {
-            y = 20;
-            const composeTarget = this.props.chatHistory.lastComposeTarget.value;
-            if (!(composeTarget.type === ChatRecipientType.Channel &&
-                composeTarget.name === RECIPIENT_ALL)) {
-                msgList = [
-                    {
-                        color: "gray",
-                        text: this.props.strings.get("TS:ChatCycleHint", "Tab"),
-                        animate: false,
-                        time: Date.now(),
-                    },
-                    ...messages,
-                ];
-            }
-        }
-        for (const msg of msgList) {
+        for (const msg of messages) {
             const animDuration = Math.min(1000, 10 * msg.text.length);
             const animProgress = msg.animate ? Math.min(1, (now - msg.time) / animDuration) : 1;
             let charsToShow = Math.round(animProgress * msg.text.length);
             if (animProgress < 1)
                 needsTick = true;
-            for (let line of this.wrapText(msg.text, maxLineLength)) {
+            let firstLine = true;
+            for (let line of this.wrapText(msg.text, Math.max(1, maxLineLength - (msg.badge ? msg.badge.label.length + 3 : 0)))) {
                 if (line.length > charsToShow) {
                     line = line.slice(0, charsToShow);
                     charsToShow = 0;
@@ -149,15 +137,22 @@ export class Messages extends UiComponent<MessagesProps> {
                 else {
                     charsToShow -= line.length;
                 }
-                y += this.drawLine(line, msg.color, y);
+                let offset = 0;
+                if (firstLine && msg.badge) {
+                    const badgeText = `[${msg.badge.label}] `;
+                    this.drawLine(badgeText, msg.badge.color, y);
+                    offset = this.ctx.measureText(badgeText).width + 4;
+                }
+                y += this.drawLine(line, msg.color, y, offset);
+                firstLine = false;
             }
         }
         this.texture.needsUpdate = true;
         if (needsTick)
             this.props.onMessageTick?.();
     }
-    drawLine(text: string, color: string, y: number): number {
-        return CanvasUtils.drawText(this.ctx, text, 0, y, {
+    drawLine(text: string, color: string, y: number, x = 0): number {
+        return CanvasUtils.drawText(this.ctx, text, x, y, {
             color,
             fontFamily: "'Fira Sans Condensed', Arial, sans-serif",
             fontSize: 13,

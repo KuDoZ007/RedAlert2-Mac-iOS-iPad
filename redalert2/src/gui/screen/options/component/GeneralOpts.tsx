@@ -1,3 +1,4 @@
+import { downloadPerformanceReport, resetPerformanceTelemetry } from "@/performance/PerformanceRuntime";
 import React, { useEffect, useState } from "react";
 import { Slider } from "@/gui/component/Slider";
 import { SCROLL_BASE_FACTOR, GeneralOptions } from "@/gui/screen/options/GeneralOptions";
@@ -8,6 +9,7 @@ import { ModelQuality } from "@/engine/renderable/entity/unit/ModelQuality";
 import { ShadowQuality } from "@/engine/renderable/entity/unit/ShadowQuality";
 import { Image } from "@/gui/component/Image";
 import { ResolutionSelect } from "@/gui/screen/options/component/Resolution";
+import { campaignSpeedLabels } from '@/game/campaign/CampaignSpeed';
 interface Strings {
     get(key: string): string;
 }
@@ -72,12 +74,11 @@ const performanceOptionItems = [
         key: 'worldSoundLoopCache',
         label: 'World Sound Loop Cache',
     },
-    {
-        key: 'telemetry',
-        label: 'Telemetry & Benchmarks',
-    },
 ] as const;
 export const GeneralOpts: React.FC<GeneralOptsProps> = ({ strings, options, fullScreen, inGame, localPrefs, }) => {
+    const [savingReport, setSavingReport] = useState(false);
+    const [reportStatus, setReportStatus] = useState('');
+    const [reportError, setReportError] = useState(false);
     const [mobileLayout, setMobileLayout] = useState(() => isCoarsePointer());
     const [mobileJoystickEnabled, setMobileJoystickEnabled] = useState(() => getJoystickPreference(localPrefs));
     useEffect(() => {
@@ -94,6 +95,12 @@ export const GeneralOpts: React.FC<GeneralOptsProps> = ({ strings, options, full
     return (<div className="opts general-opts">
     <fieldset>
       <legend>{strings.get("TS:GameplayOpts")}</legend>
+      <div className="slider-item">
+        <span className="label">Campaign game speed</span>
+        <Slider aria-label="Campaign game speed" min={1} max={6} step={1} value={String(options.campaignSpeed.value)}
+          getLabel={value => campaignSpeedLabels[Number(value)-1]}
+          onChange={e => { options.campaignSpeed.value = Number(e.target.value); }}/>
+      </div>
       <div className="slider-item">
         <span className="label">{strings.get("GUI:ScrollRate")}</span>
         <Slider min={1} max={7} value={String(Math.floor(options.scrollRate.value / SCROLL_BASE_FACTOR))} getLabel={(value) => strings.get(speedLabels.get(Number(value))!)} onChange={(e) => (options.scrollRate.value =
@@ -199,6 +206,31 @@ export const GeneralOpts: React.FC<GeneralOptsProps> = ({ strings, options, full
     </fieldset>
     <fieldset>
       <legend>Performance</legend>
+      <div className="item">
+        <label>
+          <span className="label">Slowdown diagnostics</span>
+          <input type="checkbox" aria-describedby="slowdown-diagnostics-help" defaultChecked={options.performance.telemetry.value}
+            onChange={(event) => (options.performance.telemetry.value = event.target.checked)}/>
+        </label>
+      </div>
+      <p id="slowdown-diagnostics-help">
+        Off by default. Enable to record local performance samples while investigating slowdowns
+        in multiplayer or single player. Only affects this device and can add overhead.
+      </p>
+      <div className="item">
+        <button type="button" disabled={savingReport} onClick={async () => {
+            setSavingReport(true);
+            setReportStatus('');
+            setReportError(false);
+            try { setReportStatus(await downloadPerformanceReport()); }
+            catch (error) {
+                setReportError(true);
+                setReportStatus(`Could not save report: ${error instanceof Error ? error.message : String(error)}`);
+            } finally { setSavingReport(false); }
+        }}>{savingReport ? 'Saving…' : 'Save slowdown report'}</button>
+        <button type="button" onClick={() => resetPerformanceTelemetry()}>Clear recorded samples</button>
+      </div>
+      {reportStatus && <p role={reportError ? "alert" : "status"} style={{ overflowWrap: "anywhere" }}>{reportStatus}</p>}
       {performanceOptionItems.map((item) => (<div className="item" key={item.key}>
           <label>
             <span className="label">{item.label}</span>

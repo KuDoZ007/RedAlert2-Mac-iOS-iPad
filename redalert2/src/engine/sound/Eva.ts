@@ -8,6 +8,7 @@ interface EvaSpecs {
     getSpec(name: string): EvaSpec | undefined;
 }
 interface Sound {
+    gameplaySuppressed?: boolean;
     getWavFile(name: string): any;
     audioSystem: {
         playWavFile(file: any, channel: ChannelType): any;
@@ -53,11 +54,17 @@ export class Eva {
     init(): void {
         this.renderer.onFrame.subscribe(this.handleFrame);
     }
+    clearQueue(): void {
+        this.evaWaitingList.length = 0;
+        this.currentEvaPlaying?.stop();
+        this.currentEvaPlaying = undefined;
+    }
     dispose(): void {
         this.renderer.onFrame.unsubscribe(this.handleFrame);
         this.currentEvaPlaying?.stop();
     }
     play(name: string, queue: boolean = false): void {
+        if (this.sound.gameplaySuppressed) return;
         let spec = this.evaSpecs.getSpec(name);
         if (spec) {
             if (queue) {

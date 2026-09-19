@@ -21,7 +21,16 @@ interface Alliance {
 }
 export class Alliances {
     private alliances: Alliance[] = [];
+    private campaignAllies?: Map<Player, Player[]>;
     constructor(private playerList: PlayerList) { }
+    /** Retail scenario relationships can be one-way and include passive houses. */
+    setCampaignAllies(relations: Map<Player, Player[]>): void {
+        this.campaignAllies = new Map([...relations].map(([player, allies]) => [player, [...allies]]));
+    }
+    setCampaignEnemy(player: Player, enemy: Player): void {
+        if (!this.campaignAllies) throw new Error('Expected campaign alliances');
+        this.campaignAllies.set(player, this.getAllies(player).filter(ally => ally !== enemy));
+    }
     findByPlayers(player1: Player, player2: Player): Alliance | undefined {
         const pair = new PlayerPair(player1, player2);
         return this.alliances.find(alliance => alliance.players.equals(pair));
@@ -85,10 +94,12 @@ export class Alliances {
         this.alliances.splice(this.alliances.indexOf(alliance), 1);
     }
     areAllied(player1: Player, player2: Player): boolean {
+        if (this.campaignAllies) return this.campaignAllies.get(player1)?.includes(player2) ?? false;
         const alliance = this.findByPlayers(player1, player2);
         return !!alliance && alliance.status === AllianceStatus.Formed;
     }
     getAllies(player: Player): Player[] {
+        if (this.campaignAllies) return [...this.campaignAllies.get(player) ?? []];
         return this.filterByPlayer(player)
             .filter(alliance => alliance.status === AllianceStatus.Formed)
             .map(alliance => alliance.players.first === player
@@ -128,6 +139,10 @@ export class Alliances {
         return hostilePairs;
     }
     getHash(): number {
+        if (this.campaignAllies) {
+            return fnv32a(this.playerList.getAll().flatMap(player => this.getAllies(player)
+                .map(ally => [this.playerList.getPlayerNumber(player), this.playerList.getPlayerNumber(ally), AllianceStatus.Formed]).flat()));
+        }
         return fnv32a(this.alliances
             .map(alliance => [
             this.playerList.getPlayerNumber(alliance.players.first),

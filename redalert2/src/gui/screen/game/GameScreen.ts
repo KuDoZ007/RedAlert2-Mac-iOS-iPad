@@ -1,4 +1,11 @@
+import { ObserverCatchupOverlay } from './ObserverCatchupOverlay';
+import { NetworkStallOverlay } from './NetworkStallOverlay';
+import { recordCampaignProgress } from '@/data/campaign/CampaignProgress';
+import { controllableObjects } from '@/game/campaign/CampaignControl';
+import { campaignMissions, campaignMissionForMap } from '@/data/campaign/CampaignMissions';
+import { launchCampaign, loadCampaignManifest } from './launchCampaign';
 import { powerFrameCap } from '@/engine/PowerState';
+import { campaignSpeedFactor } from '@/game/campaign/CampaignSpeed';
 import { RootScreen } from '@/gui/screen/RootScreen';
 import { CompositeDisposable } from '@/util/disposable/CompositeDisposable';
 import { MedianPing } from './MedianPing';
@@ -26,12 +33,16 @@ import { Minimap } from '@/gui/screen/game/component/Minimap';
 import { Replay } from '@/network/gamestate/Replay';
 import { ReplayRecorder } from '@/network/gamestate/ReplayRecorder';
 import { SoloPlayTurnManager } from '@/network/gamestate/SoloPlayTurnManager';
+import { NetworkTurnManager } from '@/network/client/NetworkTurnManager';
 import { LanLockstepTurnManager } from '@/network/lan/LanLockstepTurnManager';
 import { LanMatchSession } from '@/network/lan/LanMatchSession';
+import { NetworkMatchSession } from '@/network/client/NetworkMatchSession';
+import { hasSessionContent, restoreSessionContent } from '@/network/content/SessionContentResources';
 import { CombatantSidebarModel } from '@/gui/screen/game/component/hud/viewmodel/CombatantSidebarModel';
 import { ActionFactoryReg } from '@/game/action/ActionFactoryReg';
 import { MessageList } from '@/gui/screen/game/component/hud/viewmodel/MessageList';
 import { ChannelType } from '@/engine/sound/ChannelType';
+import { NetworkChatHandler } from '@/gui/screen/game/NetworkChatHandler';
 import { ChatNetHandler } from '@/gui/screen/game/ChatNetHandler';
 import { ChatTypingHandler } from '@/gui/screen/game/ChatTypingHandler';
 import { IrcConnection } from '@/network/IrcConnection';
@@ -96,9 +107,10 @@ export class GameScreen extends RootScreen {
     private lagState = false;
     private chatTypingHandler?: any;
     private chatNetHandler?: any;
-    private lanMatchSession?: LanMatchSession;
+    private lanMatchSession?: LanMatchSession | NetworkMatchSession;
     private isSinglePlayer = false;
     private isLanGame = false;
+    private persistentRoom = false;
     private isTournament = false;
     private playerName = '';
     private returnTo?: any;
@@ -130,6 +142,10 @@ export class GameScreen extends RootScreen {
         return !this.isSinglePlayer && !this.isLanGame;
     }
     async onEnter(params: any): Promise<void> {
+        if (hasSessionContent()) {
+            this.vxlGeometryPool?.clear();
+            this.buildingImageDataCache?.clear();
+        }
         this.gameEndHandled = false;
         inGameViewportActive.value = true;
         this.pointer.lock();
@@ -141,9 +157,27 @@ export class GameScreen extends RootScreen {
         let gameOpts: any;
         const lanLaunch = params.lanLaunch;
         this.lanMatchSession = params.lanMatchSession;
+        this.persistentRoom = Boolean(params.persistentRoom);
         const gameId = lanLaunch?.gameId ?? params.gameId;
         const timestamp = lanLaunch?.timestamp ?? params.timestamp;
         this.returnTo = params.returnTo ?? lanLaunch?.returnRoute;
+        if (this.lanMatchSession instanceof NetworkMatchSession && this.lanMatchSession.isObserver()) {
+            const match = this.lanMatchSession;
+            const ended = () => {
+                cancellationTokenSource.cancel();
+                this.gameEndHandled = true;
+                this.gameTurnMgr?.setErrorState();
+                this.gameAnimationLoop?.stop();
+                queueMicrotask(() => {
+                    if (this.lanMatchSession !== match) return;
+                    match.returnToLobby('forfeit');
+                    this.controller?.goToScreen(ScreenType.MainMenuRoot, { route: this.returnTo });
+                });
+            };
+            match.onMatchEnded.subscribe(ended);
+            this.disposables.add(() => match.onMatchEnded.unsubscribe(ended));
+            if (match.matchEnded) { ended(); return; }
+        }
         this.isTournament = params.tournament;
         const playerName = this.playerName = lanLaunch?.localPlayerName ?? params.playerName;
         const isSinglePlayer = this.isSinglePlayer = params.create && params.singlePlayer;
@@ -187,11 +221,17 @@ export class GameScreen extends RootScreen {
         let mapFile: any;
         try {
             const mapFileData = await this.transferAndLoadMapFile(params, gameOpts.mapName, gameOpts.mapDigest, cancellationToken);
+            if (cancellationToken.isCancelled()) return;
             if (!gameOpts.mapOfficial) {
                 this.debugMapFile = mapFileData;
                 this.disposables.add(() => this.debugMapFile = undefined);
             }
             mapFile = new MapFile(mapFileData);
+            if (this.isSinglePlayer && mapFile.getSection('Basic')?.getBool('MultiplayerOnly', true) === false) {
+                const digest = MapDigest.compute(mapFileData);
+                if (params.resumeReplay && gameOpts.mapDigest !== digest) throw new Error('Saved campaign map has changed');
+                gameOpts.mapDigest = digest;
+            }
             const mapSupportError = MapSupport.check(mapFile, this.strings);
             if (mapSupportError) {
                 this.handleError(mapSupportError, mapSupportError);
@@ -217,7 +257,7 @@ export class GameScreen extends RootScreen {
         }
         let gameLoadResult: any;
         try {
-            gameLoadResult = await this.gameLoader.load(gameId, timestamp, gameOpts, mapFile, playerName, this.isSinglePlayer, loadingScreenApi, cancellationToken);
+            gameLoadResult = await this.gameLoader.load(gameId, timestamp, gameOpts, mapFile, playerName, this.isSinglePlayer, loadingScreenApi, cancellationToken, this.lanMatchSession instanceof NetworkMatchSession && this.lanMatchSession.isObserver());
         }
         catch (error) {
             console.error('[GameScreen] Failed to load game', {
@@ -233,14 +273,20 @@ export class GameScreen extends RootScreen {
             return;
         }
         if (cancellationToken.isCancelled()) {
+            gameLoadResult.game.dispose();
+            Engine.unloadTheater(gameLoadResult.theater.type);
             return;
         }
         const { game, theater, hudSide, cameoFilenames } = gameLoadResult;
         this.game = game;
+        if (game.campaign) {
+            game.desiredSpeed.value = game.speed.value = campaignSpeedFactor(this.generalOptions.campaignSpeed.value);
+        }
         this.disposables.add(game, () => this.game = undefined, () => Engine.unloadTheater(theater.type));
         let localPlayer: any;
         try {
-            localPlayer = game.getPlayerByName(playerName);
+            localPlayer = this.lanMatchSession instanceof NetworkMatchSession && this.lanMatchSession.isObserver()
+                ? game.localPlayer : game.getPlayerByName(playerName);
         }
         catch (error) {
             console.error('[GameScreen] Failed to resolve local player after load', {
@@ -365,6 +411,9 @@ export class GameScreen extends RootScreen {
 
     private async waitForLanPlayersLoaded(cancellationToken: any): Promise<void> {
         while (!cancellationToken.isCancelled() && this.lanMatchSession && !this.lanMatchSession.areAllPlayersLoaded()) {
+            if (this.lanMatchSession instanceof NetworkMatchSession && this.lanMatchSession.fatalError) {
+                throw new Error(this.lanMatchSession.fatalError.message);
+            }
             await sleep(50);
         }
     }
@@ -384,12 +433,17 @@ export class GameScreen extends RootScreen {
             this.hud.destroy();
             this.hud = undefined;
         }
+        this.returnToRoom('forfeit');
         this.gameTurnMgr?.dispose();
         this.gameTurnMgr = undefined;
-        this.lanMatchSession?.leaveRoom();
         this.lanMatchSession?.dispose();
         this.lanMatchSession = undefined;
         this.disposables.dispose();
+        if (hasSessionContent()) {
+            this.vxlGeometryPool?.clear();
+            this.buildingImageDataCache?.clear();
+            restoreSessionContent();
+        }
         this.activeWorldScene = undefined;
         if (hadGameAnimationLoop) {
             this.uiAnimationLoop.start();
@@ -399,6 +453,10 @@ export class GameScreen extends RootScreen {
             this.gservCon.onClose.unsubscribe(this.onGservClose);
             this.gservCon.close();
         }
+    }
+    private returnToRoom(reason: 'finished' | 'forfeit'): void {
+        if (this.lanMatchSession instanceof NetworkMatchSession) this.lanMatchSession.returnToLobby(reason);
+        else this.lanMatchSession?.leaveRoom();
     }
     private restoreRendererToUiOnly(): void {
         if (!this.renderer) {
@@ -507,12 +565,24 @@ export class GameScreen extends RootScreen {
             // Screens are registered by numeric ScreenType — the old string
             // argument threw "Screen not found" AFTER teardown, leaving a
             // black screen instead of the menu.
-            this.controller?.goToScreen(ScreenType.MainMenuRoot);
+            this.controller?.goToScreen(ScreenType.MainMenuRoot, this.persistentRoom ? { route: this.returnTo } : undefined);
         });
         if (skipGoToMenu) {
             cleanup();
             this.playerUi?.dispose();
         }
+    }
+    private async nextCampaign(game: any): Promise<(() => Promise<void>) | undefined> {
+        const current = campaignMissionForMap(game.gameOpts.mapName);
+        const next = campaignMissions.find(mission => mission.id === current?.next);
+        if (!next) return;
+        const manifest = await loadCampaignManifest(next);
+        if (!manifest) return;
+        const controller = this.controller;
+        return async () => {
+            try { await launchCampaign(next, manifest, controller, this.strings, this.messageBoxApi); }
+            catch (error) { await this.messageBoxApi.alert(String(error), 'OK'); }
+        };
     }
     private saveReplay(replay: any): void {
         if (!this.replayManager?.saveReplay) {
@@ -638,6 +708,7 @@ export class GameScreen extends RootScreen {
             ? new SidebarModel(game, this.replay)
             : new CombatantSidebarModel(localPlayer, game);
         const messageList = new MessageList(game.rules.audioVisual.messageDuration, 6, undefined);
+        messageList.observerChat = this.lanMatchSession instanceof NetworkMatchSession && this.lanMatchSession.isObserver();
         const chatHistory = new ChatHistory();
         this.sidebarModel = sidebarModel;
         this.disposables.add(() => this.sidebarModel = undefined);
@@ -681,8 +752,23 @@ export class GameScreen extends RootScreen {
             minimap
         };
     }
-    private initLockstep(game: any, localPlayer: any, actionFactory: any, actionQueue: any, replayRecorder: any, lanMatchSession: LanMatchSession): any {
-        const lockstepManager = new LanLockstepTurnManager(game, localPlayer, actionQueue, actionFactory, lanMatchSession, this.actionLogger, this.lockstepLogger, replayRecorder);
+    private initLockstep(game: any, localPlayer: any, actionFactory: any, actionQueue: any, replayRecorder: any, lanMatchSession: LanMatchSession | NetworkMatchSession): any {
+        const lockstepManager = lanMatchSession instanceof NetworkMatchSession
+            ? new NetworkTurnManager(game, localPlayer, actionQueue, actionFactory, lanMatchSession, this.actionLogger, this.lockstepLogger, replayRecorder)
+            : new LanLockstepTurnManager(game, localPlayer, actionQueue, actionFactory, lanMatchSession, this.actionLogger, this.lockstepLogger, replayRecorder);
+        if (lockstepManager instanceof NetworkTurnManager) {
+            const match = lanMatchSession as NetworkMatchSession;
+            if (match.isObserver()) {
+                const returnToLobby = () => {
+                    match.returnToLobby('forfeit');
+                    this.controller?.goToScreen(ScreenType.MainMenuRoot, { route: this.returnTo });
+                };
+                this.disposables.add(new ObserverCatchupOverlay(match, returnToLobby));
+            } else this.disposables.add(new NetworkStallOverlay(match, lockstepManager, () => this.activeWorldScene?.viewport ?? this.viewport.value));
+            const onFatalError = (error: { message: string }) => this.handleError(new Error(error.message), error.message);
+            lockstepManager.onFatalError.subscribe(onFatalError);
+            this.disposables.add(() => lockstepManager.onFatalError.unsubscribe(onFatalError));
+        }
         const onLagStateChange = (lagState: boolean) => {
             this.lagState = lagState;
         };
@@ -691,6 +777,9 @@ export class GameScreen extends RootScreen {
         return lockstepManager;
     }
     private onGameStart(localPlayer: any, game: any, uiInitResult: any, actionQueue: any, actionFactory: any, replay: any): void {
+        const campaignMission = game.campaign && campaignMissionForMap(game.gameOpts.mapName);
+        if (campaignMission) recordCampaignProgress(campaignMission);
+
         this.localPrefs.removeItem(StorageKey.LastConnection);
         this.loadingScreenApi?.dispose();
         this.music?.play(MusicType.Normal);
@@ -791,7 +880,7 @@ export class GameScreen extends RootScreen {
             });
         };
         const resolveOwnedUnitById = (unitId: number) => {
-            const unit = localPlayer.getOwnedObjectById(unitId);
+            const unit = controllableObjects(localPlayer).find(unit => unit.id === unitId);
             if (!unit) {
                 throw new Error(`No owned unit found with id "${unitId}"`);
             }
@@ -801,8 +890,7 @@ export class GameScreen extends RootScreen {
             return unit;
         };
         const resolveOwnedUnitByName = (unitName: string) => {
-            const unit = localPlayer
-                .getOwnedObjects()
+            const unit = controllableObjects(localPlayer)
                 .find((ownedUnit: any) => ownedUnit.name === unitName && ownedUnit.isSpawned);
             if (!unit) {
                 throw new Error(`No spawned owned unit found with name "${unitName}"`);
@@ -1114,6 +1202,17 @@ export class GameScreen extends RootScreen {
                 !this.gameTurnMgr.getErrorState() &&
                 this.gameTurnMgr.doGameTurn(performance.now())) { }
             console.log(`[GameScreen] Resumed save at tick ${game.currentTick} in ${Math.round(performance.now() - startTime)}ms`);
+            if (game.campaign) {
+                game.campaign.presentation.length = 0;
+                eva.clearQueue();
+                const view = game.gameOpts.campaignSaveView;
+                if (view?.cameraPan) worldScene.cameraPan.setPan(view.cameraPan);
+                game.unitSelection.deselectAll();
+                for (const id of game.campaign.selectedUnitIds) {
+                    const unit = controllableObjects(game.localPlayer).find(unit => unit.id === id);
+                    if (unit?.isSpawned) game.unitSelection.addToSelection(unit);
+                }
+            }
         }
         if (this.usesServerConnection()) {
             this.initNetStats(localPlayer);
@@ -1121,6 +1220,8 @@ export class GameScreen extends RootScreen {
         this.gameAnimationLoop = new GameAnimationLoop(localPlayer, this.renderer, this.sound, this.gameTurnMgr, {
             skipFrames: true,
             skipBudgetMillis: 8,
+            isCatchingUp: this.lanMatchSession instanceof NetworkMatchSession && this.lanMatchSession.isObserver()
+                ? () => (this.lanMatchSession as NetworkMatchSession | undefined)?.isCatchingUp() ?? false : undefined,
             frameLimit: this.generalOptions.graphics.frameLimit,
             // Live getter, so an OS thermal transition mid-match takes effect on
             // the very next frame with nothing to subscribe or tear down.
@@ -1145,7 +1246,7 @@ export class GameScreen extends RootScreen {
         soundHandler.init?.();
         this.disposables.add(soundHandler);
         this.uiScene.add(hud);
-        const menu = this.menu = new GameMenu(this.gameMenuSubScreens, game, localPlayer, chatHistory, this.gservCon, this.isSinglePlayer, this.isTournament);
+        const menu = this.menu = new GameMenu(this.gameMenuSubScreens, game, localPlayer, chatHistory, this.gservCon, this.isSinglePlayer, this.isTournament, this.lanMatchSession instanceof NetworkMatchSession);
         menu.init(hud);
         this.initGameMenuEvents(menu, eva, game, localPlayer, actionQueue, actionFactory);
         this.disposables.add(menu, () => this.menu = undefined);
@@ -1162,15 +1263,19 @@ export class GameScreen extends RootScreen {
             const renderableManager = uiInitResult.worldViewInitResult.renderableManager;
             const textColor = hud.getTextColor?.();
             const worldInteractionFactory = new A.WorldInteractionFactory(localPlayer, game, game.unitSelection, renderableManager, this.uiScene, worldScene, this.pointer, this.renderer, this.keyBinds, this.generalOptions, this.runtimeVars.freeCamera, this.runtimeVars.debugPaths, this.config.devMode, document, this.minimap, this.strings, textColor, game.debugText, this.battleControlApi);
-            this.playerUi = new CombatantUi(game, localPlayer, this.isSinglePlayer, actionQueue, actionFactory, this.sidebarModel, this.renderer, worldScene, soundHandler, messageList, this.sound, eva, worldInteractionFactory, menu, this.pointer, this.runtimeVars, this.speedCheat, this.strings, undefined, renderableManager, superWeaponFxHandler, beaconFxHandler, this.messageBoxApi, this.config.discordUrl);
+            this.playerUi = new CombatantUi(game, localPlayer, this.isSinglePlayer, actionQueue, actionFactory, this.sidebarModel, this.renderer, worldScene, soundHandler, messageList, this.sound, eva, worldInteractionFactory, menu, this.pointer, this.runtimeVars, this.speedCheat, this.strings, undefined, renderableManager, superWeaponFxHandler, beaconFxHandler, this.messageBoxApi, this.config.discordUrl, this.music);
         }
         this.playerUi.init?.(hud);
         this.disposables.add(this.playerUi, () => this.playerUi = undefined);
-        if (this.usesServerConnection()) {
-            const chatNetHandler = new ChatNetHandler(this.gservCon, this.wolService, messageList, chatHistory, new ChatMessageFormat(this.strings, localPlayer.name), localPlayer, game, this.replayRecorderInstance, this.mutedPlayers ?? new Set<string>());
+        if (this.usesServerConnection() || this.lanMatchSession instanceof NetworkMatchSession) {
+            const chatNetHandler = this.lanMatchSession instanceof NetworkMatchSession
+                ? new NetworkChatHandler(this.lanMatchSession, messageList, chatHistory, new ChatMessageFormat(this.strings, localPlayer.name), game, this.replayRecorderInstance, this.mutedPlayers ?? new Set<string>())
+                : new ChatNetHandler(this.gservCon, this.wolService, messageList, chatHistory, new ChatMessageFormat(this.strings, localPlayer.name), localPlayer, game, this.replayRecorderInstance, this.mutedPlayers ?? new Set<string>());
             chatNetHandler.init();
             const worldInteraction = this.playerUi.worldInteraction;
             const chatTypingHandler = new ChatTypingHandler(worldInteraction.keyboardHandler, worldInteraction.arrowScrollHandler, messageList, chatHistory);
+            worldInteraction.chatTypingHandler = chatTypingHandler;
+            this.disposables.add(chatNetHandler);
             this.chatTypingHandler = chatTypingHandler;
             this.chatNetHandler = chatNetHandler;
             this.disposables.add(() => {
@@ -1208,14 +1313,14 @@ export class GameScreen extends RootScreen {
             this.pointer.lock();
             this.pointer.setVisible(false);
             this.playerUi.dispose();
-            if (!localPlayer.isObserver && !this.isSinglePlayer && !this.lagState) {
+            if (!localPlayer.isObserver && !this.isSinglePlayer && !this.lagState && !(this.lanMatchSession instanceof NetworkMatchSession)) {
                 actionQueue.push(actionFactory.create(ActionType.ResignGame));
                 await new Promise<void>((resolve) => {
                     this.gameTurnMgr.onActionsSent.subscribeOnce(() => resolve());
                 });
             }
             if (this.isLanGame) {
-                this.lanMatchSession?.leaveRoom();
+                this.returnToRoom('forfeit');
             }
             if (this.usesServerConnection()) {
                 try {
@@ -1265,7 +1370,9 @@ export class GameScreen extends RootScreen {
             this.pointer.lock();
             this.playerUi.worldInteraction.setEnabled(true);
             if (this.isSinglePlayer && this.pausedAtSpeed) {
-                game.desiredSpeed.value = this.pausedAtSpeed;
+                game.desiredSpeed.value = game.campaign
+                    ? campaignSpeedFactor(this.generalOptions.campaignSpeed.value)
+                    : this.pausedAtSpeed;
                 this.gameTurnMgr.doGameTurn(performance.now());
                 this.pausedAtSpeed = undefined;
                 this.mixer.setMuted(ChannelType.Effect, false);
@@ -1287,7 +1394,9 @@ export class GameScreen extends RootScreen {
         const save = new Replay();
         save.gameId = replay.gameId;
         save.gameTimestamp = replay.gameTimestamp;
-        save.gameOpts = replay.gameOpts;
+        save.gameOpts = game.campaign ? {...replay.gameOpts, campaignSaveView: {
+            cameraPan: this.playerUi.worldScene.cameraPan.getPan(),
+        }} : replay.gameOpts;
         save.engineVersion = replay.engineVersion;
         save.modHash = replay.modHash;
         save.timestamp = Date.now();
@@ -1310,8 +1419,11 @@ export class GameScreen extends RootScreen {
 
         try {
             const isObserver = Boolean(localPlayer?.isObserver);
-            const isVictory = !localPlayer?.defeated ||
-                game?.alliances?.getAllies(localPlayer)?.some((ally: any) => !ally.defeated);
+            const isVictory = game.campaign ? game.campaign.outcome === 'victory' : (!localPlayer?.defeated ||
+                game?.alliances?.getAllies(localPlayer)?.some((ally: any) => !ally.defeated));
+
+            const completedMission = game.campaign && isVictory && campaignMissionForMap(game.gameOpts.mapName);
+            if (completedMission) recordCampaignProgress(completedMission, true);
 
             console.log('[GameScreen] onGameEnd', {
                 singlePlayer: this.isSinglePlayer,
@@ -1323,9 +1435,9 @@ export class GameScreen extends RootScreen {
 
             if (this.jsxRenderer && this.viewport) {
                 [gameResultPopup] = this.jsxRenderer.render(jsx(GameResultPopup, {
-                    type: isVictory && !isObserver
-                        ? GameResultType.MpVictory
-                        : GameResultType.MpDefeat,
+                    type: game.campaign
+                        ? (isVictory ? GameResultType.SpVictory : GameResultType.SpDefeat)
+                        : (isVictory && !isObserver ? GameResultType.MpVictory : GameResultType.MpDefeat),
                     viewport: this.viewport.value
                 }));
             }
@@ -1334,7 +1446,7 @@ export class GameScreen extends RootScreen {
             this.gameTurnMgr?.setErrorState?.();
             this.gameAnimationLoop?.stop?.();
             if (this.isLanGame) {
-                this.lanMatchSession?.leaveRoom();
+                this.returnToRoom(game.alliances.getHostilePlayers().length ? 'forfeit' : 'finished');
             }
 
             if (this.usesServerConnection() && this.gservCon) {
@@ -1344,6 +1456,7 @@ export class GameScreen extends RootScreen {
 
             if (gameResultPopup) {
                 this.uiScene?.add(gameResultPopup);
+                if (game.campaign) this.uiAnimationLoop.start();
             }
 
             if (!isObserver) {
@@ -1351,7 +1464,9 @@ export class GameScreen extends RootScreen {
             }
 
             if (replay) {
-                replay.finish(game?.currentTick ?? 0);
+                // onEnd fires inside the current simulation tick (or its action
+                // processing). Include that tick so playback reaches the outcome.
+                replay.finish((game?.currentTick ?? 0) + 1);
                 this.saveReplay(replay);
             }
 
@@ -1381,6 +1496,7 @@ export class GameScreen extends RootScreen {
                     localPlayer,
                     singlePlayer: this.isSinglePlayer,
                     tournament: this.isTournament,
+                    nextCampaign: game.campaign?.outcome === 'victory' ? await this.nextCampaign(game) : undefined,
                     returnTo: this.returnTo ?? new MainMenuRoute(MainMenuScreenType.Home, undefined)
                 })
                 : new MainMenuRoute(MainMenuScreenType.Home, undefined);

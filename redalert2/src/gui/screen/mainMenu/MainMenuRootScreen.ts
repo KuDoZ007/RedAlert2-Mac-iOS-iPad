@@ -1,3 +1,4 @@
+import { CampaignScreen } from './campaign/CampaignScreen';
 import { RootScreen } from '../RootScreen';
 import { MainMenu } from './component/MainMenu';
 import { MainMenuController } from './MainMenuController';
@@ -44,6 +45,8 @@ export class MainMenuRootScreen extends RootScreen {
     private keyBinds?: any;
     private rootController?: any;
     private config: Config;
+    // The room outlives each menu view/controller, including the score screen.
+    private multiplayerScreen?: any;
     private mainMenu?: MainMenu;
     private mainMenuCtrl?: MainMenuController;
     constructor(subScreens: Map<MainMenuScreenType, any>, uiScene: UiScene, strings: Strings, images: LazyResourceCollection<ShpFile>, jsxRenderer: JsxRenderer, messageBoxApi: MessageBoxApi, appVersion: string, config: Config, videoSrc?: string | File, sound?: any, music?: any, generalOptions?: any, localPrefs?: any, fullScreen?: any, mixer?: any, keyBinds?: any, rootController?: any) {
@@ -105,6 +108,7 @@ export class MainMenuRootScreen extends RootScreen {
         if (!this.subScreens.has(MainMenuScreenType.Score)) {
             this.subScreens.set(MainMenuScreenType.Score, ScoreScreen as any);
         }
+        this.subScreens.set(MainMenuScreenType.Campaign, CampaignScreen);
         for (const [screenType, screenClass] of this.subScreens) {
             const screen: any = await this.createScreen(screenType, screenClass, controller);
             if (screen) {
@@ -127,6 +131,9 @@ export class MainMenuRootScreen extends RootScreen {
         }, 0);
     }
     private async createScreen(screenType: MainMenuScreenType, screenClass: any, _controller: any): Promise<any> {
+        if (screenType === MainMenuScreenType.Multiplayer && this.multiplayerScreen) {
+            return this.multiplayerScreen;
+        }
         let screen: any;
         if (screenType === MainMenuScreenType.InfoAndCredits) {
             screen = new screenClass(this.strings, this.messageBoxApi);
@@ -204,7 +211,7 @@ export class MainMenuRootScreen extends RootScreen {
             const engineModHash = Engine.getActiveMod?.() ?? '';
             screen = new screenClass(engineVersion, engineModHash, undefined, undefined, this.rootController, this.strings, this.jsxRenderer, errorHandler, this.messageBoxApi, replayManager, undefined, rules);
         }
-        else if (screenType === MainMenuScreenType.LanSetup) {
+        else if (screenType === MainMenuScreenType.LanSetup || screenType === MainMenuScreenType.Multiplayer) {
             const { ErrorHandler } = await import('../../../ErrorHandler.js');
             const { Rules } = await import('../../../game/rules/Rules.js');
             const { MapFileLoader } = await import('../game/MapFileLoader.js');
@@ -227,14 +234,18 @@ export class MainMenuRootScreen extends RootScreen {
             catch (error) {
                 console.error("[MainMenuRootScreen] Couldn't get map dir for LAN setup", error);
             }
-            screen = new screenClass(this.rootController, this.strings, this.jsxRenderer, rules, mapFileLoader, mapList, gameModes, this.localPrefs, this.messageBoxApi, mapDir);
+            screen = new screenClass(this.rootController, this.strings, this.jsxRenderer, rules, mapFileLoader, mapList, gameModes, this.localPrefs, this.messageBoxApi, mapDir, this.config.engine);
+        }
+        else if (screenType === MainMenuScreenType.Campaign) {
+            screen = new screenClass(this.jsxRenderer, this.messageBoxApi);
         }
         else if (screenType === MainMenuScreenType.Home) {
-            screen = new screenClass(this.strings, this.messageBoxApi, this.appVersion, false, false, this.fullScreen);
+            screen = new screenClass(this.strings, this.messageBoxApi, this.appVersion, false, false, this.fullScreen, this.rootController, (this as any).replayManager);
         }
         else {
             screen = new screenClass(this.strings, this.messageBoxApi, this.appVersion, false, false);
         }
+        if (screenType === MainMenuScreenType.Multiplayer) this.multiplayerScreen = screen;
         return screen;
     }
     async onLeave(): Promise<void> {

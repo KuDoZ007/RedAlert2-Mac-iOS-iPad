@@ -44,6 +44,7 @@ interface PlaybackHandle {
     stop(): void;
 }
 export class Sound {
+    public gameplaySuppressed = false;
     private audioSystem: AudioSystem;
     private audioFiles: AudioFiles;
     private soundSpecs: SoundSpecs;
@@ -83,6 +84,11 @@ export class Sound {
         this.audioSystem.dispose();
         this.document.removeEventListener("click", this.handleClick);
     }
+    beginSpecsOverlay(specs: SoundSpecs): () => void {
+        const previous = this.soundSpecs;
+        this.soundSpecs = specs;
+        return () => { this.soundSpecs = previous; };
+    }
     private getSoundKey(key: SoundKey | string): string | undefined {
         let soundKey: string | undefined;
         if (typeof SoundKey[key as keyof typeof SoundKey] === "string") {
@@ -117,6 +123,7 @@ export class Sound {
         }
     }
     private playWithOptions(spec: SoundSpec, channel: ChannelType, volume: number, pan: number, limit: number, loops: number): PlaybackHandle | undefined {
+        if (this.gameplaySuppressed && channel !== ChannelType.Ui) return;
         if (!spec.sounds.length)
             return;
         this.cleanOldHandles();

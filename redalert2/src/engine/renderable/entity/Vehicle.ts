@@ -125,6 +125,7 @@ interface GameObjectInterface {
         facing: number;
     };
     turretNo: number;
+    campaignTruckLoaded?: boolean;
     veteranLevel: any;
     harvesterTrait?: any;
     airSpawnTrait?: {
@@ -177,6 +178,7 @@ export class Vehicle {
     bodyVxlBuilder?: any;
     mainVxl?: any;
     noSpawnAltVxl?: any;
+    loadedTruckVxl?: any;
     harvesterAltVxl?: any;
     turret?: any;
     allTurrets?: any[];
@@ -291,7 +293,7 @@ export class Vehicle {
     create3DObject() {
         let e = this.get3DObject();
         e ||
-            ((e = new d.BoxIntersectObject3D(new THREE.Vector3(1, 1 / 3, 1).multiplyScalar(S.Coords.LEPTONS_PER_TILE))),
+            ((e = new d.BoxIntersectObject3D(new THREE.Vector3(1, 1 / 3, 1).multiplyScalar(S.Coords.LEPTONS_PER_TILE), true)),
                 (e.name = this.label),
                 (e.userData.id = this.gameObject.id),
                 (this.target = e),
@@ -375,7 +377,7 @@ export class Vehicle {
                 }),
                 this.placeholder?.setOpacity(t);
         }
-        if ((t || a || s || n || bkChanged || roChanged) &&
+        if (t || a || s || n || bkChanged || roChanged) {
             (n && this.highlightAnimRunner.tick(i),
                 (p = s ? this.invulnAnimRunner.getValue() : 0),
                 (P = (n ? this.highlightAnimRunner.getValue() : 0) || p),
@@ -384,8 +386,10 @@ export class Vehicle {
                         A.ExtraLightHelper.ironCurtainShp(this.shpExtraLight, this.baseShpExtraLight, p as any))
                     : (A.ExtraLightHelper.multiplyVxl(this.vxlExtraLight, this.baseVxlExtraLight, this.lighting.getAmbientIntensity(), P as any),
                         A.ExtraLightHelper.multiplyShp(this.shpExtraLight, this.baseShpExtraLight, P as any)),
-                this.applyBerserkTint(),
-            this.gameObject.isDestroyed && this.resolveObjectRemove)) {
+                this.applyBerserkTint());
+        }
+        // Sinking is time-based and must advance even after visual dirty flags clear.
+        if (this.gameObject.isDestroyed && this.resolveObjectRemove) {
             if ((this.squidGrabAnim &&
                 (this.posObj?.remove(this.squidGrabAnim.get3DObject()),
                     this.squidGrabAnim.dispose(),
@@ -756,6 +760,16 @@ export class Vehicle {
             else
                 console.warn(`VXL missing for vehicle ${this.objectRules.name}. Vxl file ${t} not found. `),
                     n.add(this.createPlaceholder());
+            if (this.gameObject.name === 'TRUCKA') {
+                const loaded = this.voxels.get('truckb.vxl');
+                if (loaded) {
+                    const builder = this.vxlBuilderFactory.create(loaded, this.voxelAnims.get('truckb.hva'), this.paletteRemaps, this.palette);
+                    this.vxlBuilders.push(builder);
+                    this.loadedTruckVxl = builder.build();
+                    this.loadedTruckVxl.visible = false;
+                    n.add(this.loadedTruckVxl);
+                }
+            }
             if (this.objectRules.spawns &&
                 this.objectRules.noSpawnAlt) {
                 let i = e + "wo.vxl";
@@ -896,7 +910,8 @@ export class Vehicle {
             ].includes(this.gameObject.harvesterTrait.status);
         this.noSpawnAltVxl && (this.noSpawnAltVxl.visible = e),
             this.harvesterAltVxl && (this.harvesterAltVxl.visible = t),
-            this.mainVxl && (this.mainVxl.visible = !e && !t);
+            this.mainVxl && (this.mainVxl.visible = !e && !t && !(this.loadedTruckVxl && this.gameObject.campaignTruckLoaded));
+        if (this.loadedTruckVxl) this.loadedTruckVxl.visible = !!this.gameObject.campaignTruckLoaded;
     }
     isSinker() {
         return (this.gameObject.zone === M.ZoneType.Water &&

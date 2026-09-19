@@ -2,6 +2,7 @@ import { jsx } from '@/gui/jsx/jsx';
 import { OBS_COUNTRY_ID, NO_TEAM_ID } from '@/game/gameopts/constants';
 import { PlayerConnectionStatus } from '@/network/gamestate/PlayerConnectionStatus';
 import { LanMatchSession } from '@/network/lan/LanMatchSession';
+import { NetworkMatchSession } from '@/network/client/NetworkMatchSession';
 import { CompositeDisposable } from '@/util/disposable/CompositeDisposable';
 import { LoadingScreenWrapper } from './LoadingScreenWrapper';
 import { LoadingScreenApi } from './LoadingScreenApi';
@@ -75,7 +76,7 @@ export class LanLoadingScreenApi implements LoadingScreenApi {
     };
 
     constructor(
-        private readonly lanMatchSession: LanMatchSession,
+        private readonly lanMatchSession: LanMatchSession | NetworkMatchSession,
         private readonly rules: Rules,
         private readonly strings: Strings,
         private readonly uiScene: UiScene,
@@ -113,7 +114,8 @@ export class LanLoadingScreenApi implements LoadingScreenApi {
         const extendedInfos = (this.players ?? []).map((player) => {
             const peerId = assignmentByName.get(player.name);
             const transportMember = peerId ? transportByPeerId.get(peerId) : undefined;
-            const status = !transportMember
+            const localObserver = this.lanMatchSession instanceof NetworkMatchSession && this.lanMatchSession.isObserver() && player.name === this.localPlayerName;
+            const status = localObserver ? PlayerConnectionStatus.Connected : !transportMember
                 ? PlayerConnectionStatus.Disconnected
                 : transportMember.isSelf || transportMember.status === 'connected'
                     ? PlayerConnectionStatus.Connected
@@ -121,7 +123,7 @@ export class LanLoadingScreenApi implements LoadingScreenApi {
             return {
                 name: player.name,
                 status,
-                loadPercent: peerId ? lanSnapshot.loadPercentByPeerId[peerId] ?? 0 : 0,
+                loadPercent: localObserver ? this.lastLoadPercent : peerId ? lanSnapshot.loadPercentByPeerId[peerId] ?? 0 : 0,
                 country: countries[player.countryId],
                 color: player.countryId === OBS_COUNTRY_ID
                     ? '#fff'

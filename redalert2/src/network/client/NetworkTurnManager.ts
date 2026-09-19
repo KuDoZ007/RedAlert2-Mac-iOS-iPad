@@ -1,0 +1,243 @@
+import { incrementPerformanceCounter, isPerformanceTelemetryEnabled, measurePerformanceMetric, recordPerformanceDuration, setPerformanceContext, setPerformanceSimulationTick } from "@/performance/PerformanceRuntime";
+import { GameStatus } from '@/game/Game';
+import { GameSpeed } from '@/game/GameSpeed';
+import { ActionType } from '@/game/action/ActionType';
+import { NoAction } from '@/game/action/NoAction';
+import { Parser } from '@/network/gameopt/Parser';
+import { Serializer } from '@/network/gameopt/Serializer';
+import { LanResolvedTurn } from '@/network/lan/LanMatchSession';
+import { NetworkMatchSession } from './NetworkMatchSession';
+import { EventDispatcher } from '@/util/event';
+
+export class NetworkTurnManager {
+    private readonly serializer = new Serializer();
+    private readonly parser = new Parser();
+    private readonly submittedTicks = new Set<number>();
+    private gameTurnMillis = 1000 / GameSpeed.BASE_TICKS_PER_SECOND;
+    private errorState = false;
+    private passiveMode = false;
+    private lagState = false;
+    private waitingSince?: number;
+    getStallDuration(): number { return this.errorState || !this.waitingSince ? 0 : Date.now() - this.waitingSince; }
+    private matchDisposed = false;
+    private waitingPeerIds: string[] = [];
+    private lastWait?: { tick: number; elapsedMs: number; initiallyMissingPeerIds: string[] };
+
+    public readonly onActionsSent = new EventDispatcher<this, string>();
+    public readonly onActionsReceived = new EventDispatcher<this, string>();
+    public readonly onLagStateChange = new EventDispatcher<this, boolean>();
+
+    constructor(
+        private readonly game: any,
+        private readonly localPlayer: any,
+        private readonly inputActions: { dequeueAll(): any[] },
+        private readonly actionFactory: any,
+        private readonly matchSession: NetworkMatchSession,
+        private readonly actionLogger?: { debug(message: string): void },
+        private readonly lockstepLogger?: { debug?(message: string): void; warn?(message: string): void },
+        private readonly replayRecorder?: { recordActions?(tick: number, actions: any[]): void }
+    ) { }
+
+    init(): void {
+        this.computeGameTurn(this.game.speed.value);
+        this.matchSession.onActionsReceived.subscribe(this.handleActionsReceived);
+        this.matchSession.onFatalError.subscribe(this.handleFatalError);
+        if (this.matchSession.fatalError) this.handleFatalError(this.matchSession.fatalError);
+    }
+
+    getTurnMillis(): number {
+        return this.gameTurnMillis;
+    }
+
+    setPassiveMode(passive: boolean): void {
+        this.passiveMode = passive;
+    }
+
+    setErrorState(): void {
+        this.errorState = true;
+    }
+
+    getErrorState(): boolean {
+        return this.errorState;
+    }
+
+    doGameTurn(_timestamp: number): boolean {
+        if (this.errorState || !this.matchSession.areAllPlayersLoaded()) {
+            this.publishPerformanceContext(this.game.currentTick, this.errorState ? 'error' : 'loading');
+            return false;
+        }
+
+        const tick = this.game.currentTick;
+        setPerformanceSimulationTick(tick);
+        const wasEnded = this.game.status === GameStatus.Ended;
+        if (!wasEnded) {
+            const localTurnId = this.submitLocalTurn(tick);
+            if (localTurnId) {
+                this.onActionsSent.dispatch(this, localTurnId);
+            }
+
+            if (this.errorState) return false;
+            const resolvedTurn = this.matchSession.tryConsumeTurn(tick);
+            if (!resolvedTurn) {
+                incrementPerformanceCounter('network.pendingTurnPolls');
+                this.updateLagState(true, tick);
+                this.publishPerformanceContext(tick, 'waiting-for-relayed-turn');
+                return false;
+            }
+
+            this.updateLagState(false, tick);
+            this.publishPerformanceContext(tick, 'running');
+            const processedActions = measurePerformanceMetric('network.actions', () => this.processResolvedTurn(tick, resolvedTurn));
+            if (processedActions.length) {
+                this.replayRecorder?.recordActions?.(tick, processedActions);
+            }
+            if (tick > 0 && tick % 300 === 0) {
+                this.lockstepLogger?.debug?.(`[network] tick=${tick} hash=${this.game.getHash()} peers=${resolvedTurn.batches.map((batch) => batch.peerId).join(',')}`);
+            }
+        }
+
+        this.game.update();
+        this.submittedTicks.delete(tick);
+        // Game end callbacks can stop the turn manager and leave the room inside update().
+        if (!wasEnded && !this.errorState && !this.matchDisposed) this.matchSession.sendSync(tick, measurePerformanceMetric('network.hash', () => this.game.getHash()));
+        return true;
+    }
+
+    dispose(): void {
+        this.publishPerformanceContext(this.game.currentTick, 'disposed');
+        this.matchSession.onActionsReceived.unsubscribe(this.handleActionsReceived);
+        this.matchSession.onFatalError.unsubscribe(this.handleFatalError);
+        if (!this.matchDisposed) {
+            this.matchSession.dispose();
+            this.matchDisposed = true;
+        }
+    }
+
+    readonly onFatalError = new EventDispatcher<this, { message: string; frame?: number }>();
+    private readonly handleFatalError = (error: { message: string; frame?: number }) => {
+        this.errorState = true;
+        try {
+            const report = { ...error, gameId: this.matchSession.start.gameId, tick: this.game.currentTick, state: this.game.debugGetState?.() };
+            (globalThis as any).__RA2_NETWORK_SYNC_REPORT__ = report;
+            console.error('[network] Match stopped', report);
+            if (typeof document !== 'undefined') {
+                const url = URL.createObjectURL(new Blob([JSON.stringify(report)], { type: 'application/json' }));
+                const anchor = document.createElement('a');
+                anchor.href = url;
+                anchor.download = `ra2-sync-${this.matchSession.start.gameId}-${error.frame ?? this.game.currentTick}.json`;
+                anchor.click();
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+            }
+        } catch (reportError) {
+            console.warn('[network] Could not export match diagnostics', reportError);
+        }
+        this.onFatalError.dispatch(this, error);
+    };
+
+    private readonly handleActionsReceived = (turnId: string) => {
+        this.onActionsReceived.dispatch(this, turnId);
+    };
+
+    private computeGameTurn(speed: number): void {
+        this.gameTurnMillis = 1000 / (speed * GameSpeed.BASE_TICKS_PER_SECOND);
+    }
+
+    private submitLocalTurn(tick: number): string | undefined {
+        if (this.matchSession.isObserver()) { this.inputActions.dequeueAll(); return; }
+        if (this.submittedTicks.has(tick)) {
+            return undefined;
+        }
+        let actions = this.inputActions.dequeueAll();
+        if (!actions.length) {
+            actions = [new NoAction()];
+        }
+
+        const actionData = this.serializer.serializePlayerActions(actions.map((action: any) => ({
+            id: action.actionType,
+            params: action.serialize?.() ?? new Uint8Array(),
+        })));
+
+        this.submittedTicks.add(tick);
+        return this.matchSession.submitLocalTurn(tick, actionData);
+    }
+
+    private processResolvedTurn(tick: number, resolvedTurn: LanResolvedTurn): any[] {
+        const processedActions: any[] = [];
+
+        resolvedTurn.batches.forEach((batch) => {
+            const assignment = this.matchSession.getHumanAssignment(batch.peerId);
+            if (!assignment) {
+                return;
+            }
+
+            const player = this.game.getPlayerByName(assignment.name);
+            const actionRecords = batch.actionData.length ? this.parser.parsePlayerActions(batch.actionData) : [];
+            actionRecords.forEach((record) => {
+                if (record.id === ActionType.AiTakeover || record.id === ActionType.DestroyDisconnectedPlayer) throw new Error('AI takeover must come from the server.');
+                const action = this.actionFactory.create(record.id);
+                action.unserialize?.(record.params);
+                action.player = player;
+                action.process();
+                processedActions.push(action);
+
+                const printable = action.print?.();
+                if (printable) {
+                    this.actionLogger?.debug(`(${action.player.name})@${tick}: ${printable}`);
+                }
+            });
+        });
+
+        resolvedTurn.dropPeerIds.forEach((peerId) => {
+            const assignment = this.matchSession.getHumanAssignment(peerId);
+            if (!assignment) {
+                return;
+            }
+
+            const player = this.game.getPlayerByName(assignment.name);
+            const action = this.actionFactory.create(this.matchSession.takesOverWithAi(peerId) ? ActionType.AiTakeover : ActionType.DestroyDisconnectedPlayer);
+            action.unserialize?.(new Uint8Array());
+            action.player = player;
+            action.process();
+            processedActions.push(action);
+            this.actionLogger?.debug(`(${player.name})@${tick}: [drop] peer disconnected`);
+        });
+
+        return processedActions;
+    }
+
+    private publishPerformanceContext(tick: number, state: string): void {
+        if (!isPerformanceTelemetryEnabled()) return;
+        setPerformanceContext('network', {
+            ...this.matchSession.getPerformanceSnapshot(state === 'waiting-for-relayed-turn' ? tick : undefined),
+            state,
+            simulationTick: tick,
+            waitingMs: state === 'waiting-for-relayed-turn' && this.waitingSince !== undefined ? Math.max(0, Date.now() - this.waitingSince) : 0,
+            lastWait: this.lastWait ?? null,
+        });
+    }
+
+    private updateLagState(nextLagState: boolean, tick: number): void {
+        if (this.lagState === nextLagState) {
+            return;
+        }
+        if (!nextLagState && this.waitingSince !== undefined) {
+            const elapsedMs = Math.max(0, Date.now() - this.waitingSince);
+            if (isPerformanceTelemetryEnabled()) {
+                this.lastWait = { tick, elapsedMs, initiallyMissingPeerIds: this.waitingPeerIds };
+                this.publishPerformanceContext(tick, 'running');
+            }
+            recordPerformanceDuration('network.wait', elapsedMs);
+            this.waitingPeerIds = [];
+        }
+        this.lagState = nextLagState;
+        this.waitingSince = nextLagState ? Date.now() : undefined;
+        this.onLagStateChange.dispatch(this, nextLagState);
+        if (nextLagState) {
+            incrementPerformanceCounter('network.waitEpisodes');
+            if (isPerformanceTelemetryEnabled()) {
+                this.waitingPeerIds = this.matchSession.getPerformanceSnapshot(tick).missingPeerIds;
+            }
+            this.lockstepLogger?.warn?.(`[network] waiting for turn ${tick}${this.passiveMode ? ' (passive)' : ''}`);
+        }
+    }
+}

@@ -37,6 +37,7 @@ interface LobbyFormProps {
     messages?: any[];
     localUsername?: string;
     channels?: any[];
+    allowWhispers?: boolean;
     chatHistory?: any;
     activeSlotIndex: number;
     countryUiNames: any;
@@ -45,6 +46,7 @@ interface LobbyFormProps {
     availablePlayerColors: any;
     availableStartPositions: any;
     teamsAllowed: boolean;
+    observersAllowed?: boolean;
     teamsRequired: boolean;
     maxTeams: number;
     availableAiNames: any;
@@ -221,7 +223,7 @@ export class LobbyForm extends React.Component<LobbyFormProps> {
 
         {this.props.messages !== undefined &&
                 this.props.localUsername !== undefined &&
-                this.props.onSendMessage && (<Chat messages={this.props.messages} localUsername={this.props.localUsername} channels={this.props.channels ?? []} chatHistory={this.props.chatHistory} onSendMessage={this.props.onSendMessage} onCancelMessage={() => { }} tooltips={{
+                this.props.onSendMessage && (<Chat messages={this.props.messages} localUsername={this.props.localUsername} channels={this.props.channels ?? []} allowWhispers={this.props.allowWhispers} chatHistory={this.props.chatHistory} onSendMessage={this.props.onSendMessage} onCancelMessage={() => { }} tooltips={{
                     button: strings.get("STT:EmoteButton"),
                     input: isHost
                         ? strings.get("STT:HostEditInput")
@@ -266,7 +268,7 @@ export class LobbyForm extends React.Component<LobbyFormProps> {
                         : (index !== props.activeSlotIndex &&
                             (!isHost || slot.type !== SlotType.Ai)) ||
                             (slot.status === PlayerStatus.Ready &&
-                                slot.type !== SlotType.Ai))} teamId={slot.type === SlotType.Observer || slot.country === OBS_COUNTRY_NAME ? OBS_TEAM_ID : (props.teamsAllowed ? slot.team : NO_TEAM_ID)} required={props.teamsRequired} maxTeams={props.maxTeams} showObserver={index === props.activeSlotIndex} onSelect={(team) => this.props.onTeamSelect(team, index)} strings={props.strings}/>
+                                slot.type !== SlotType.Ai))} teamId={slot.type === SlotType.Observer || slot.country === OBS_COUNTRY_NAME ? OBS_TEAM_ID : (props.teamsAllowed ? slot.team : NO_TEAM_ID)} required={props.teamsRequired} maxTeams={props.maxTeams} showObserver={props.observersAllowed !== false && index === props.activeSlotIndex} onSelect={(team) => this.props.onTeamSelect(team, index)} strings={props.strings}/>
       </div>) : (<div className="player-slot" key={"playerslot" + index}/>);
     }
     renderPlayerStatus(status: any) {
@@ -275,7 +277,7 @@ export class LobbyForm extends React.Component<LobbyFormProps> {
     renderPlayerSelect(slot: any, index: number, lobbyType: LobbyType) {
         const isSingleplayer = lobbyType === LobbyType.Singleplayer;
         const isHost = isSingleplayer || lobbyType === LobbyType.MultiplayerHost;
-        if (index === this.props.activeSlotIndex || (isHost && index === 0)) {
+        if (index === this.props.activeSlotIndex || (isSingleplayer && index === 0)) {
             return (<input type="text" className="player-name" value={slot.name} readOnly={true}/>);
         }
         const strings = this.props.strings;
@@ -307,7 +309,7 @@ export class LobbyForm extends React.Component<LobbyFormProps> {
                 optionsMap.set(key, resolvedName);
             });
         }
-        return (<Select initialValue={"" + selectedValue} disabled={!isHost} onSelect={(value) => this.onPlayerSelect(value, index)} className="player-name" tooltip={isSingleplayer
+        return (<Select initialValue={"" + selectedValue} disabled={!isHost || slot.selectionLocked} onSelect={(value) => this.onPlayerSelect(value, index)} className="player-name" tooltip={isSingleplayer
                 ? strings.get("STT:SkirmishComboAiPlayer")
                 : strings.get("STT:HostComboPlayer")}>
         {[...optionsMap]

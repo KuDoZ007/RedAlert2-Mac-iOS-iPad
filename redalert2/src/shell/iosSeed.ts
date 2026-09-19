@@ -3,7 +3,13 @@ import { GameResSource } from '../engine/gameRes/GameResSource';
 
 declare global {
     interface Window {
-        __RA2_SHELL__?: { platform: string; version: string };
+        __RA2_SHELL__?: {
+            platform: string;
+            version: string;
+            hostGame?: (options: import('../network/server/GameServer').GameServerOptions & { port: number }) => Promise<{ port: number; addresses: string[] }>;
+            stopHosting?: () => Promise<void>;
+            savePerformanceReport?: (json: string) => Promise<{ path: string }>;
+        };
     }
 }
 

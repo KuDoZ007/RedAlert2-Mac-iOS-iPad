@@ -1,3 +1,4 @@
+import { canControl } from '@/game/campaign/CampaignControl';
 import { PointerType } from '@/engine/type/PointerType';
 import { Coords } from '@/game/Coords';
 import { isNotNullOrUndefined } from '@/util/typeGuard';
@@ -10,6 +11,8 @@ import { Target, TargetBridgeMode } from '@/game/Target';
 import { AttackMoveOrder } from '@/game/order/AttackMoveOrder';
 import { OrderFeedbackType } from '@/game/order/OrderFeedbackType';
 import { GuardAreaOrder } from '@/game/order/GuardAreaOrder';
+import { ActionFilter } from './ActionFilter';
+export { ActionFilter } from './ActionFilter';
 class SelectAction {
     private force = false;
     private allowTypeSelect = false;
@@ -43,14 +46,14 @@ class SelectAction {
         const canCollapseMultipleSelection = !this.toggleSelect &&
             targetAlreadySelected &&
             selected.length > 1 &&
-            selected.every((unit: any) => unit.owner === target.owner);
+            selected.every((unit: any) => unit.owner === target.owner || (canControl(this.currentPlayer, unit) && canControl(this.currentPlayer, target)));
         if (!this.toggleSelect &&
             selected.some((unit: any) => unit.isUnit?.()) &&
             this.currentPlayer &&
             !this.currentPlayer.isObserver &&
             target.isTechno?.() &&
             !this.game.areFriendly(target, selected[0]) &&
-            selected[0].owner === this.currentPlayer) {
+            canControl(this.currentPlayer, selected[0])) {
             return false;
         }
         return (target.rules.selectable &&
@@ -75,11 +78,6 @@ class SelectAction {
             this.unitSelectionHandler.selectSingleUnit(target);
         }
     }
-}
-export enum ActionFilter {
-    All = 0,
-    SelectOnly = 1,
-    NoSelect = 2
 }
 export class DefaultActionHandler {
     private readonly _onOrder = new EventDispatcher<any, any>();
@@ -159,7 +157,7 @@ export class DefaultActionHandler {
     private getDefaultAction(sourceObject: any, selected: any[], hover: any, filter: ActionFilter, force: boolean, allowTypeSelect: boolean, keyboardEvent: any, minimap: boolean): any {
         const hoveredObject = hover.gameObject;
         const selectAction = this.selectAction.setForce(force).setTypeSelect(false);
-        if (!sourceObject || sourceObject.owner !== this.currentPlayer || sourceObject.rules.spawned) {
+        if (!sourceObject || !canControl(this.currentPlayer, sourceObject) || sourceObject.rules.spawned) {
             return !minimap && filter !== ActionFilter.NoSelect && selectAction.isValidTarget(hoveredObject)
                 ? selectAction
                 : undefined;
@@ -291,7 +289,9 @@ export class DefaultActionHandler {
     update(hover: any, selected: any[], rightClickMove: boolean, keyboardEvent: any, minimap: boolean = false): void {
         this.currentHover = hover;
         this.currentSelected = selected;
-        this.mostSignificantAction = this.updateMostSignificantAction(selected, hover, ActionFilter.All, rightClickMove, false, keyboardEvent, minimap);
+        this.mostSignificantAction = this.updateMostSignificantAction(selected, hover,
+            rightClickMove && selected.length ? ActionFilter.NoSelect : ActionFilter.All,
+            false, false, keyboardEvent, minimap);
         this.currentTarget = this.mostSignificantAction instanceof SelectAction
             ? this.createOrderTarget(hover)
             : this.mostSignificantAction?.target ?? this.createOrderTarget(hover);
